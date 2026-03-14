@@ -1,0 +1,160 @@
+<!DOCTYPE html>
+<html lang="da">
+<head>
+    <meta charset="UTF-8">
+    <title>Samtale Fordeler v22 - Semi-Automatisk Fundament</title>
+    <script src="https://cdn.sheetjs.com/xlsx-latest/package/dist/xlsx.full.min.js"></script>
+    <style>
+        body { font-family: sans-serif; margin: 20px; background: #f4f7f6; }
+        .card { background: white; padding: 25px; border-radius: 12px; box-shadow: 0 4px 20px rgba(0,0,0,0.1); max-width: 1000px; margin: auto; }
+        textarea { width: 100%; border: 1px solid #ccc; border-radius: 6px; padding: 10px; font-family: monospace; }
+        button { background: #34495e; color: white; padding: 16px; border: none; border-radius: 6px; cursor: pointer; font-size: 18px; width: 100%; font-weight: bold; }
+        .info-box { background: #e8f4fd; border-left: 5px solid #3498db; padding: 15px; margin-bottom: 20px; font-size: 14px; }
+        .log { background: #2d3436; color: #fab1a0; padding: 15px; border-radius: 6px; font-family: monospace; font-size: 11px; height: 150px; overflow-y: auto; margin-top: 15px; }
+    </style>
+</head>
+<body>
+
+<div class="card">
+    <h1>🗓️ Samtale Fordeler v22 (Fundament-mode)</h1>
+    <div class="info-box">
+        <strong>Koncept:</strong> Denne version er "forsigtig". Den placerer kun samtaler, der ligger 100% kompakt for læreren. 
+        De "svære" samtaler efterlades i <em>IKKE PLACERET</em>, så du selv kan lægge dem ind, hvor du synes det giver bedst mening.
+    </div>
+
+    <label>Elevdata (ID [TAB] Navn [TAB] Ønsker)</label>
+    <textarea id="rawInput" style="height: 100px;"></textarea>
+
+    <div style="margin: 15px 0;">
+        Start: <input type="time" id="startTime" value="17:00"> 
+        Slut: <input type="time" id="endTime" value="21:00">
+        Interval: <input type="number" id="duration" value="10" style="width: 40px;"> min.
+    </div>
+
+    <button onclick="runFoundationMode()">GENERÉR KOMPAKT FUNDAMENT (5000 KØRSLER)</button>
+    <div id="status" class="log">Klar til at bygge fundament...</div>
+</div>
+
+<script>
+function parseTime(s) { const [h, m] = s.split(':').map(Number); return h * 60 + m; }
+function formatTime(m) { return `${Math.floor(m/60)}:${(m%60).toString().padStart(2, '0')}`; }
+
+function runFoundationMode() {
+    const log = document.getElementById('status');
+    const input = document.getElementById('rawInput').value.trim();
+    if(!input) return alert("Indsæt data");
+
+    let bestResult = null;
+    let maxPlaced = -1;
+
+    for(let i=0; i<5000; i++) {
+        const res = simulate(input);
+        // Vi leder efter den kørsel, der kan placere FLEST mulige samtaler uden at bryde kompaktheds-reglen
+        if(res.placedCount > maxPlaced) {
+            maxPlaced = res.placedCount;
+            bestResult = res;
+        }
+    }
+    
+    log.innerHTML += `Færdig! Placeret: ${bestResult.placedCount}. Mangler: ${bestResult.unplacedCount}.<br>`;
+    generateExcel(bestResult);
+}
+
+function simulate(input) {
+    const duration = parseInt(document.getElementById('duration').value);
+    const startM = parseTime(document.getElementById('startTime').value);
+    const endM = parseTime(document.getElementById('endTime').value);
+    const slots = [];
+    for(let t = startM; t < endM; t += duration) slots.push(t);
+
+    let students = input.split('\n').map(line => {
+        const parts = line.split('\t');
+        return { name: parts[0], id: parts[1], wishes: parts[2].split(',').map(w => ({ initials: w.trim().split(' ')[0].toUpperCase(), full: w.trim(), done: false })), schedule: {} };
+    });
+
+    // Sorter elever tilfældigt, men vægt dem med flest ønsker først
+    students.sort((a,b) => (b.wishes.length - a.wishes.length) || (Math.random() - 0.5));
+
+    const teachers = {};
+    const roomOccupancy = {};
+
+    students.forEach(s => {
+        s.wishes.forEach(w => { if(!teachers[w.initials]) teachers[w.initials] = { plan: {}, room: "Lokale_" + w.initials }; });
+    });
+
+    let placedTotal = 0;
+
+    // Vi prøver kun at lægge samtaler ind, hvis de er "perfekte"
+    students.forEach(s => {
+        let bestCombo = null;
+        
+        // Find en tid hvor eleven har sine samtaler samlet (max 10 min gap mellem hinanden)
+        // OG hvor læreren ikke får et gap.
+        for(let startSlot of slots) {
+            let tempSched = {};
+            let possible = true;
+            let currentT = startSlot;
+
+            for(let wish of s.wishes) {
+                const tea = teachers[wish.initials];
+                // KOMPAKT-REGEL: Læreren skal enten være ledig på starttidspunktet, 
+                // eller samtalen skal ligge direkte efter deres sidste samtale.
+                const teaTimes = Object.keys(tea.plan).map(Number).sort((a,b) => a-b);
+                const isStart = currentT === startM;
+                const isNextToExisting = teaTimes.length > 0 && (tea.plan[currentT-duration] || tea.plan[currentT+duration]);
+                
+                if(!tea.plan[currentT] && (isStart || isNextToExisting) && currentT < endM) {
+                    tempSched[currentT] = wish;
+                    currentT += duration;
+                } else {
+                    possible = false;
+                    break;
+                }
+            }
+
+            if(possible) {
+                bestCombo = tempSched;
+                break;
+            }
+        }
+
+        if(bestCombo) {
+            Object.keys(bestCombo).forEach(t => {
+                const time = parseInt(t); const wish = bestCombo[t];
+                teachers[wish.initials].plan[time] = s.id;
+                s.schedule[time] = wish.full;
+                wish.done = true;
+                placedTotal++;
+            });
+        }
+    });
+
+    let unplaced = 0;
+    students.forEach(s => unplaced += s.wishes.filter(w => !w.done).length);
+
+    return { students, teachers, slots, placedCount: placedTotal, unplacedCount: unplaced };
+}
+
+function generateExcel(res) {
+    const wb = XLSX.utils.book_new();
+    // Matrix ark
+    const tKeys = Object.keys(res.teachers).sort();
+    const matrix = [["Tid", ...tKeys]];
+    res.slots.forEach(t => {
+        const row = [formatTime(t)];
+        tKeys.forEach(k => row.push(res.teachers[k].plan[t] || ""));
+        matrix.push(row);
+    });
+    XLSX.utils.book_append_sheet(wb, XLSX.utils.aoa_to_sheet(matrix), "PLAN_OVERBLIK");
+
+    const unp = [["ElevID", "Navn", "Mangler samtale med"]];
+    res.students.forEach(s => {
+        s.wishes.filter(w => !w.done).forEach(w => unp.push([s.id, s.name, w.full]));
+    });
+    XLSX.utils.book_append_sheet(wb, XLSX.utils.aoa_to_sheet(unp), "MANUELLE_OPGAVER");
+
+    XLSX.writeFile(wb, "Fundament_Til_Manuel_Færdiggørelse.xlsx");
+}
+</script>
+</body>
+</html>
